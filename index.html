@@ -1,0 +1,111 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="theme-color" content="#fcfaf8">
+  <meta name="description" content="A cozy little corner of the internet to share moments and stay close.">
+  <title>mellow — little moments, closer friends</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=DM+Sans:wght@400;500;600;700&family=Manrope:wght@400;500;600;700;800&display=swap" rel="stylesheet">
+  <link rel="stylesheet" href="styles.css">
+  <script src="app.js" defer></script>
+</head>
+<body>
+  <div class="app-shell">
+    <aside class="sidebar">
+      <a class="brand" href="#" data-view="home" aria-label="mellow home">
+        <span class="brand-mark"><svg viewBox="0 0 32 32" aria-hidden="true"><path d="M7 17.4c2.4-5.8 5-8.7 8-8.7 2.4 0 3.8 2.8 5.2 6.1s2.7 5.4 4.8 5.4c1.2 0 2.4-.8 3.8-2.5"/><path d="M6 22.1h20"/></svg></span>
+        <span>mellow<span class="brand-dot">.</span></span>
+      </a>
+
+      <button class="mobile-profile" data-view="profile" type="button"><span class="avatar avatar-you">J</span><span>Jamie Parker</span></button>
+
+      <nav class="primary-nav" aria-label="Main navigation">
+        <span class="nav-caption">YOUR SPACE</span>
+        <button class="nav-link active" type="button" data-view="home">
+          <svg viewBox="0 0 24 24" aria-hidden="true"><path d="m3 10 9-7 9 7v9a2 2 0 0 1-2 2h-4v-7H9v7H5a2 2 0 0 1-2-2z"/></svg><span>Home</span>
+        </button>
+        <button class="nav-link" type="button" data-view="explore">
+          <svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="11" cy="11" r="7"/><path d="m20 20-4-4M11 8v6M8 11h6"/></svg><span>Explore</span>
+        </button>
+        <button class="nav-link" type="button" data-view="messages">
+          <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M20 11.5a7.5 7.5 0 0 1-7.5 7.5 8 8 0 0 1-3.5-.8L4 20l1.5-4A7.4 7.4 0 0 1 4 11.5 7.5 7.5 0 0 1 11.5 4H12a7.5 7.5 0 0 1 8 7.5Z"/><path d="M8 12h.01M12 12h.01M16 12h.01"/></svg><span>Messages</span><span class="nav-badge">2</span>
+        </button>
+        <button class="nav-link" type="button" data-view="saved">
+          <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M6 4.5A1.5 1.5 0 0 1 7.5 3h9A1.5 1.5 0 0 1 18 4.5V21l-6-4-6 4z"/></svg><span>Saved</span>
+        </button>
+      </nav>
+
+      <div class="sidebar-bottom">
+        <div class="sidebar-note">
+          <span class="note-spark">✳</span>
+          <p>Little moments matter.</p>
+          <span>Make room for the good ones.</span>
+        </div>
+        <button class="profile-button" data-view="profile" type="button">
+          <span class="avatar avatar-you">J</span>
+          <span class="profile-copy"><strong>Jamie Parker</strong><small>@jamieparks</small></span>
+          <svg class="profile-more" viewBox="0 0 24 24" aria-hidden="true"><circle cx="5" cy="12" r="1"/><circle cx="12" cy="12" r="1"/><circle cx="19" cy="12" r="1"/></svg>
+        </button>
+      </div>
+    </aside>
+
+    <div class="page-column">
+      <header class="topbar">
+        <div class="mobile-brand">mellow<span class="brand-dot">.</span></div>
+        <label class="search-box">
+          <svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="11" cy="11" r="7"/><path d="m20 20-4-4"/></svg>
+          <input id="searchInput" type="search" placeholder="Search people and moments" aria-label="Search people and posts">
+          <kbd>⌘ K</kbd>
+        </label>
+        <div class="topbar-actions">
+          <button class="icon-button notification-button" type="button" aria-label="Notifications" data-toast="You're all caught up!">
+            <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M18 9a6 6 0 0 0-12 0c0 7-3 7-3 9h18c0-2-3-2-3-9M10 21h4"/></svg><span class="notification-dot"></span>
+          </button>
+          <button class="create-button" id="openComposer" type="button"><span>＋</span><span>Create post</span></button>
+        </div>
+      </header>
+
+      <main id="mainContent" class="main-content" tabindex="-1"></main>
+    </div>
+  </div>
+
+  <nav class="mobile-nav" aria-label="Mobile navigation">
+    <button class="mobile-nav-link active" type="button" data-view="home" aria-label="Home"><svg viewBox="0 0 24 24"><path d="m3 10 9-7 9 7v9a2 2 0 0 1-2 2h-4v-7H9v7H5a2 2 0 0 1-2-2z"/></svg></button>
+    <button class="mobile-nav-link" type="button" data-view="explore" aria-label="Explore"><svg viewBox="0 0 24 24"><circle cx="11" cy="11" r="7"/><path d="m20 20-4-4"/></svg></button>
+    <button class="mobile-nav-create" id="mobileCreate" type="button" aria-label="Create a post">＋</button>
+    <button class="mobile-nav-link" type="button" data-view="messages" aria-label="Messages"><svg viewBox="0 0 24 24"><path d="M20 11.5a7.5 7.5 0 0 1-7.5 7.5 8 8 0 0 1-3.5-.8L4 20l1.5-4A7.4 7.4 0 0 1 4 11.5 7.5 7.5 0 0 1 11.5 4H12a7.5 7.5 0 0 1 8 7.5Z"/></svg></button>
+    <button class="mobile-nav-link" type="button" data-view="profile" aria-label="Profile"><span class="avatar avatar-you">J</span></button>
+  </nav>
+
+  <dialog class="composer-dialog" id="composerDialog">
+    <form class="composer-card" id="postForm">
+      <div class="dialog-heading">
+        <div><span class="eyebrow">SHARE A MOMENT</span><h2>Create a post</h2></div>
+        <button class="icon-button close-dialog" type="button" aria-label="Close">×</button>
+      </div>
+      <label class="upload-zone" id="uploadZone" for="imageInput">
+        <img id="imagePreview" alt="Selected image preview" hidden>
+        <span class="upload-placeholder">
+          <span class="upload-icon"><svg viewBox="0 0 24 24" aria-hidden="true"><rect x="3" y="3" width="18" height="18" rx="3"/><circle cx="8.5" cy="8.5" r="1.5"/><path d="m21 15-5-5L5 21"/></svg></span>
+          <strong>Drop a photo here</strong>
+          <span>or <span class="browse-link">browse your files</span></span>
+          <small>JPG, PNG or GIF · up to 10 MB</small>
+        </span>
+        <input id="imageInput" type="file" accept="image/*" required>
+      </label>
+      <label class="caption-label" for="postCaption">Caption</label>
+      <textarea id="postCaption" maxlength="240" rows="3" placeholder="What’s happening in this moment?"></textarea>
+      <div class="composer-footer"><span id="captionCount">0 / 240</span><button class="create-button submit-post" type="submit">Share post <span>↗</span></button></div>
+    </form>
+  </dialog>
+
+  <dialog class="story-dialog" id="storyDialog">
+    <button class="story-close icon-button" type="button" aria-label="Close story">×</button>
+    <div class="story-viewer"></div>
+  </dialog>
+  <div class="toast-region" id="toastRegion" aria-live="polite"></div>
+</body>
+</html>
