@@ -16,9 +16,12 @@ After deployment, test account creation, sign-in, a photo post, a story upload, 
 
 Create an account with a 3–20 character username or an email address, plus a 6–72 character password. Use the same username or email to sign in. Log out from your profile. Password verification uses browser Web Crypto, so use HTTPS or localhost if the browser blocks it for a local file.
 
+If you forget your password, choose **Forgot password?** on the sign-in screen. The reset updates the password stored in this browser and requires matching new passwords. It does not send an email or verify your identity.
+
 ## Important demo limitations
 
 - Accounts, posts, stories, profile photos, and chats are stored in the visitor's browser. They do not sync between devices or appear for other visitors.
+- Password recovery is only a local demo convenience, not secure account recovery. A real password reset requires a backend that verifies account ownership and sends a time-limited reset link.
 - This is a front-end demonstration, not a secure public social network. Do not use a real password or upload private images.
 - Clearing the browser's site data removes the demo content. Browser storage has limited capacity.
 - Stories expire after 24 hours.

@@ -292,6 +292,9 @@ dialog::backdrop { background: rgb(39 34 29 / 48%); backdrop-filter: blur(3px); 
 .auth-submit:disabled { cursor: wait; opacity: .7; }
 .auth-submit span { font-size: 17px; font-weight: 400; }
 .auth-error { margin: 2px 0 0; color: #383d42; font-size: 11px; line-height: 1.45; }
+.auth-success { margin: 0 0 8px; color: #38804e; font-size: 11px; line-height: 1.45; }
+.auth-forgot { justify-self: end; padding: 2px 0; border: 0; background: transparent; color: #34393e; font-size: 11px; font-weight: 700; cursor: pointer; }
+.auth-forgot:disabled { color: #999ea3; cursor: wait; }
 .auth-switch { margin: 18px 0; color: #797e84; text-align: center; font-size: 11px; }
 .auth-switch button { padding: 0; border: 0; background: transparent; color: #34393e; font-size: inherit; font-weight: 700; cursor: pointer; }
 .auth-switch button:disabled { color: #999ea3; cursor: wait; }
@@ -450,6 +453,7 @@ button:focus-visible, a:focus-visible, input:focus-visible, textarea:focus-visib
 .sidebar-note > span:last-child, .profile-copy small, .post-user span, .conversation-info span,
 .conversation-time, .page-subtitle, .friend-copy small, .profile-stats,
 .auth-intro, .auth-switch, .auth-notice { color: #999aa4; }
+.auth-success { color: #8bd19e; }
 .note-spark, .upload-icon { background: #281116; color: #ff5265; }
 .topbar {
   border-color: #24252b;
@@ -530,7 +534,7 @@ button:focus-visible, a:focus-visible, input:focus-visible, textarea:focus-visib
 }
 .auth-form input:focus { border-color: #f1273f; outline-color: #3a121a; }
 .auth-submit { color: #fff; }
-.auth-switch button, .auth-notice strong { color: #ff6475; }
+.auth-switch button, .auth-forgot, .auth-notice strong { color: #ff6475; }
 .auth-notice { border-color: #30232a; background: #151116; }
 .auth-error { color: #ff7281; }
 dialog { color: var(--ink); }

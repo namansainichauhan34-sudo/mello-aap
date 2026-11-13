@@ -21,6 +21,7 @@ let selectedStoryImage = "";
 let toastTimer;
 let authMode = getAccounts().length ? "login" : "signup";
 let authPending = false;
+let authSuccessMessage = "";
 let currentUser = readSessionUser();
 let followed = loadFollowedForCurrentUser();
 let notifications = loadNotificationsForCurrentUser();
@@ -46,7 +47,7 @@ if (conversations.length !== readStorage("mellow-conversations", []).length) sav
 const main = document.querySelector("#mainContent");
 const authScreen = document.querySelector("#authScreen");
 authScreen.addEventListener("input", event => {
-  if (event.target instanceof HTMLInputElement && event.target.name === "username") {
+  if (event.target instanceof HTMLInputElement) {
     const errorBox = document.querySelector("#authError");
     errorBox.hidden = true;
     errorBox.textContent = "";
@@ -319,20 +320,25 @@ function loadFollowedForCurrentUser() {
 function renderAuth() {
   document.body.classList.add("auth-mode");
   authScreen.hidden = false;
+  const isSignup = authMode === "signup";
+  const isReset = authMode === "reset";
   authScreen.innerHTML = `<section class="auth-card" aria-labelledby="authTitle">
     <a class="auth-brand" href="#" aria-label="mellow home"><span class="brand-mark"><svg viewBox="0 0 32 32" aria-hidden="true"><path d="M7 17.4c2.4-5.8 5-8.7 8-8.7 2.4 0 3.8 2.8 5.2 6.1s2.7 5.4 4.8 5.4c1.2 0 2.4-.8 3.8-2.5"/><path d="M6 22.1h20"/></svg></span><span>mellow<span class="brand-dot">.</span></span></a>
-    <span class="eyebrow">${authMode === "signup" ? "YOUR OWN LITTLE CORNER" : "WELCOME BACK"}</span>
-    <h1 id="authTitle">${authMode === "signup" ? "Let’s connect the world." : "Good to see you again."}</h1>
-    <p class="auth-intro">${authMode === "signup" ? "Create your account and start sharing with your people." : "Sign in with the username or email and password you chose on this device."}</p>
+    <span class="eyebrow">${isSignup ? "YOUR OWN LITTLE CORNER" : isReset ? "ACCOUNT RECOVERY" : "WELCOME BACK"}</span>
+    <h1 id="authTitle">${isSignup ? "Let’s connect the world." : isReset ? "Reset your password." : "Good to see you again."}</h1>
+    <p class="auth-intro">${isSignup ? "Create your account and start sharing with your people." : isReset ? "Enter the username or email on your account and choose a new password." : "Sign in with the username or email and password you chose on this device."}</p>
+    ${authSuccessMessage ? `<p class="auth-success" role="status">${escapeHTML(authSuccessMessage)}</p>` : ""}
     <form class="auth-form" id="authForm" novalidate>
-      ${authMode === "signup" ? `<label for="authName">Your name</label><input id="authName" name="name" autocomplete="name" maxlength="40" placeholder="Your name" required>` : ""}
+      ${isSignup ? `<label for="authName">Your name</label><input id="authName" name="name" autocomplete="name" maxlength="40" placeholder="Your name" required>` : ""}
       <label for="authUsername">Username or email</label><input id="authUsername" name="username" type="text" autocomplete="username" maxlength="254" placeholder="yourname or you@example.com" required>
-      <label for="authPin">Password</label><input id="authPin" name="pin" minlength="6" maxlength="72" autocomplete="${authMode === "signup" ? "new-password" : "current-password"}" placeholder="At least 6 characters" type="password" required>
+      <label for="authPin">${isReset ? "New password" : "Password"}</label><input id="authPin" name="pin" minlength="6" maxlength="72" autocomplete="${authMode === "login" ? "current-password" : "new-password"}" placeholder="At least 6 characters" type="password" required>
+      ${isReset ? `<label for="authPinConfirm">Confirm new password</label><input id="authPinConfirm" name="pinConfirm" minlength="6" maxlength="72" autocomplete="new-password" placeholder="Enter your new password again" type="password" required>` : ""}
+      ${authMode === "login" ? `<button class="auth-forgot" type="button" data-auth-mode="reset"${authPending ? " disabled" : ""}>Forgot password?</button>` : ""}
       <p class="auth-error" id="authError" role="alert" hidden></p>
-      <button class="auth-submit" type="submit">${authMode === "signup" ? "Create account" : "Log in"} <span>→</span></button>
+      <button class="auth-submit" type="submit">${isSignup ? "Create account" : isReset ? "Reset password" : "Log in"} <span>→</span></button>
     </form>
-    <p class="auth-switch">${authMode === "signup" ? `Already have an account? <button type="button" data-auth-mode="login"${authPending ? " disabled" : ""}>Log in</button>` : `New around here? <button type="button" data-auth-mode="signup"${authPending ? " disabled" : ""}>Create an account</button>`}</p>
-    <p class="auth-notice"><strong>Portfolio demo only.</strong> Use a throwaway password. Accounts, images, stories, and chats stay in this browser, are not private or synced, and are not shared with visitors on other devices.</p>
+    <p class="auth-switch">${isSignup ? `Already have an account? <button type="button" data-auth-mode="login"${authPending ? " disabled" : ""}>Log in</button>` : isReset ? `Remember your password? <button type="button" data-auth-mode="login"${authPending ? " disabled" : ""}>Log in</button>` : `New around here? <button type="button" data-auth-mode="signup"${authPending ? " disabled" : ""}>Create an account</button>`}</p>
+    <p class="auth-notice"><strong>Portfolio demo only.</strong> ${isReset ? "Password reset only updates this browser; no email is sent and no identity is verified. " : ""}Use a throwaway password. Accounts, images, stories, and chats stay in this browser, are not private or synced, and are not shared with visitors on other devices.</p>
   </section>`;
 }
 
@@ -569,6 +575,7 @@ document.addEventListener("click", event => {
   const authModeButton = target.closest("[data-auth-mode]");
   if (authModeButton) {
     authMode = authModeButton.dataset.authMode;
+    authSuccessMessage = "";
     renderAuth();
     return;
   }
@@ -734,6 +741,7 @@ document.addEventListener("submit", async event => {
     const formData = new FormData(form);
     const username = String(formData.get("username") || "").trim().replace(/^@/, "").toLowerCase();
     const pin = String(formData.get("pin") || "");
+    const pinConfirm = String(formData.get("pinConfirm") || "");
     const errorBox = document.querySelector("#authError");
     const isUsername = /^[a-z0-9._]{3,20}$/.test(username);
     const isEmail = username.length <= 254 && /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(username);
@@ -745,14 +753,18 @@ document.addEventListener("submit", async event => {
       showAuthError(errorBox, "Use a password with 6–72 characters.");
       return;
     }
+    if (authMode === "reset" && pin !== pinConfirm) {
+      showAuthError(errorBox, "The new passwords do not match.");
+      return;
+    }
     authPending = true;
     const submitButton = form.querySelector('button[type="submit"]');
-    const modeButton = authScreen.querySelector("[data-auth-mode]");
+    const modeButtons = [...authScreen.querySelectorAll("[data-auth-mode]")];
     const formInputs = [...form.querySelectorAll("input")];
     formInputs.forEach(input => { input.disabled = true; });
     submitButton.disabled = true;
     submitButton.textContent = "Please wait…";
-    if (modeButton) modeButton.disabled = true;
+    modeButtons.forEach(button => { button.disabled = true; });
     try {
       if (!globalThis.crypto?.subtle || !globalThis.crypto?.getRandomValues) {
         throw new Error("Secure password hashing is unavailable in this browser context.");
@@ -773,6 +785,20 @@ document.addEventListener("submit", async event => {
         localStorage.setItem("mellow-accounts", JSON.stringify(accounts));
         setCurrentUser(accounts[accounts.length - 1]);
         showToast("Your account is ready.");
+      } else if (authMode === "reset") {
+        const account = accounts.find(item => item.handle.toLowerCase() === username);
+        if (!account) {
+          showAuthError(errorBox, "No account matches that username or email in this browser.");
+          return;
+        }
+        const salt = crypto.getRandomValues(new Uint8Array(16));
+        account.salt = encodeSalt(salt);
+        account.pinHash = await hashPin(pin, salt);
+        localStorage.setItem("mellow-accounts", JSON.stringify(accounts));
+        authMode = "login";
+        authSuccessMessage = "Password updated on this browser. You can now sign in.";
+        renderAuth();
+        return;
       } else {
         if (!accounts.length) {
           showAuthError(errorBox, "No account is saved in this browser yet. Create an account first.");
@@ -789,10 +815,12 @@ document.addEventListener("submit", async event => {
       currentView = "home";
       render();
     } catch (error) {
-      console.error("Could not complete sign-in.", error);
+      console.error(authMode === "reset" ? "Could not reset the password." : "Could not complete sign-in.", error);
       showAuthError(errorBox, error instanceof Error && error.message === "Secure password hashing is unavailable in this browser context."
-        ? "Password sign-in needs a browser with Web Crypto. Open this site on HTTPS or localhost and try again."
-        : "Sign-in failed. Check this browser’s storage access and try again.");
+        ? "Password updates need a browser with Web Crypto. Open this site on HTTPS or localhost and try again."
+        : authMode === "reset"
+          ? "Password reset failed. Check this browser’s storage access and try again."
+          : "Sign-in failed. Check this browser’s storage access and try again.");
     } finally {
       authPending = false;
       formInputs.forEach(input => {
@@ -800,9 +828,11 @@ document.addEventListener("submit", async event => {
       });
       if (submitButton.isConnected) {
         submitButton.disabled = false;
-        submitButton.innerHTML = `${authMode === "signup" ? "Create account" : "Log in"} <span>→</span>`;
+        submitButton.innerHTML = `${authMode === "signup" ? "Create account" : authMode === "reset" ? "Reset password" : "Log in"} <span>→</span>`;
       }
-      if (modeButton?.isConnected) modeButton.disabled = false;
+      modeButtons.forEach(button => {
+        if (button.isConnected) button.disabled = false;
+      });
     }
     return;
   }
