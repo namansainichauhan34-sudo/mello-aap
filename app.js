@@ -1,11 +1,16 @@
-let posts = [];
-let conversations = [];
-let stories = [];
-let cloudAccounts = [];
-let cloudAuthUser = null;
-let supabaseClient = null;
-let cloudChannel = null;
-let syncing = false;
+function readStorage(key, fallback) {
+  try {
+    const stored = localStorage.getItem(key);
+    return stored ? JSON.parse(stored) : fallback;
+  } catch (error) {
+    console.warn(`Could not read ${key} from local storage.`, error);
+    return fallback;
+  }
+}
+
+let posts = readStorage("mellow-posts", []);
+let conversations = readStorage("mellow-conversations", []);
+let stories = readStorage("mellow-stories", []);
 const STORY_LIFETIME = 24 * 60 * 60 * 1000;
 let storyExpiryTimer;
 let currentView = "home";
@@ -14,11 +19,29 @@ let searchQuery = "";
 let selectedImage = "";
 let selectedStoryImage = "";
 let toastTimer;
-let authMode = "signup";
+let authMode = getAccounts().length ? "login" : "signup";
 let authPending = false;
-let currentUser = null;
-let followed = [];
-let notifications = [];
+let currentUser = readSessionUser();
+let followed = loadFollowedForCurrentUser();
+let notifications = loadNotificationsForCurrentUser();
+const storedPosts = posts;
+posts = (Array.isArray(posts) ? posts : []).flatMap(post => {
+  if (!post || typeof post !== "object") return [];
+  if (typeof post.author === "string") return [post];
+  if (post.person === 5 && currentUser) {
+    return [{ ...post, author: currentUser.handle, likesBy: post.liked ? [currentUser.handle] : [], savedBy: post.saved ? [currentUser.handle] : [] }];
+  }
+  return [];
+}).filter(post => getUser(post.author));
+conversations = (Array.isArray(conversations) ? conversations : []).filter(item =>
+  item && Array.isArray(item.memberHandles) && item.memberHandles.length > 1 &&
+  item.memberHandles.every(handle => getUser(handle)) && Array.isArray(item.messages)
+);
+const storedStories = Array.isArray(stories) ? stories.length : 0;
+stories = (Array.isArray(stories) ? stories : []).filter(isActiveStory);
+if (stories.length !== storedStories) saveStorage("mellow-stories", stories);
+if (posts.length !== storedPosts.length) saveStorage("mellow-posts", posts);
+if (conversations.length !== readStorage("mellow-conversations", []).length) saveStorage("mellow-conversations", conversations);
 
 const main = document.querySelector("#mainContent");
 const authScreen = document.querySelector("#authScreen");
@@ -38,6 +61,15 @@ const storyUploadZone = document.querySelector("#storyUploadZone");
 const uploadZone = document.querySelector("#uploadZone");
 const postCaption = document.querySelector("#postCaption");
 
+function saveStorage(key, value) {
+  try {
+    localStorage.setItem(key, JSON.stringify(value));
+  } catch (error) {
+    console.error(`Could not save ${key} to local storage.`, error);
+    showToast("Couldn't save that change on this device.");
+  }
+}
+
 function escapeHTML(value) {
   return String(value).replace(/[&<>"']/g, character => ({
     "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;"
@@ -48,20 +80,41 @@ function displayHandle(handle) {
   return handle.includes("@") ? handle : `@${handle}`;
 }
 
-function getAccounts() { return cloudAccounts; }
-function readSessionUser() { return currentUser; }
-function setCurrentUser(account) {
-  currentUser = { uid: account.uid, name: account.name, handle: account.handle, avatar: account.avatar || "" };
+function getAccounts() {
+  const accounts = readStorage("mellow-accounts", []);
+  return Array.isArray(accounts) ? accounts.filter(account => account && typeof account.name === "string" && typeof account.handle === "string") : [];
 }
+
+function readSessionUser() {
+  try {
+    const stored = sessionStorage.getItem("mellow-active-user");
+    const sessionUser = stored ? JSON.parse(stored) : null;
+    if (!sessionUser || typeof sessionUser.handle !== "string") return null;
+    const account = getAccounts().find(item => item.handle === sessionUser.handle);
+    return account ? { name: account.name, handle: account.handle, avatar: account.avatar || "" } : null;
+  } catch (error) {
+    console.warn("Could not read the active session.", error);
+    sessionStorage.removeItem("mellow-active-user");
+    return null;
+  }
+}
+
+function setCurrentUser(account) {
+  currentUser = { name: account.name, handle: account.handle, avatar: account.avatar || "" };
+  sessionStorage.setItem("mellow-active-user", JSON.stringify({ handle: currentUser.handle }));
+  followed = loadFollowedForCurrentUser();
+  notifications = loadNotificationsForCurrentUser();
+}
+
 function getUser(handle) {
   const account = getAccounts().find(item => item.handle === handle);
-  return account ? { uid: account.uid, name: account.name, handle: account.handle, avatar: account.avatar || "" } : null;
+  return account ? { name: account.name, handle: account.handle, avatar: account.avatar || "" } : null;
 }
 
 function getPeople() {
   return getAccounts()
     .filter(account => account.handle !== currentUser?.handle)
-    .map(account => ({ uid: account.uid, name: account.name, handle: account.handle, avatar: account.avatar || "" }));
+    .map(account => ({ name: account.name, handle: account.handle, avatar: account.avatar || "" }));
 }
 
 function getPostAuthor(post) {
@@ -85,31 +138,106 @@ function scheduleStoryExpiry() {
     const activeStories = stories.filter(isActiveStory);
     if (activeStories.length !== stories.length) {
       stories = activeStories;
+      saveStorage("mellow-stories", stories);
       render();
     }
     scheduleStoryExpiry();
   }, Math.max(0, nextExpiry - Date.now()));
 }
 
-function loadNotificationsForCurrentUser() { return notifications; }
-async function addNotification(recipientHandle, { type, actor = currentUser?.handle, postId = null, conversationId = null, text = "" }) {
-  const recipient = getUser(recipientHandle);
-  if (!recipient || recipient.handle === actor || !cloudAuthUser) return;
-  const { error } = await supabaseClient.from("mellow_notifications").insert({
-    recipient_id: recipient.uid, actor_id: cloudAuthUser.id, type,
-    post_id: postId, conversation_id: conversationId, text: String(text).slice(0, 180)
+function followedStorageKey() {
+  return `mellow-followed:${currentUser.handle}`;
+}
+
+function notificationsStorageKey(handle = currentUser?.handle) {
+  return handle ? `mellow-notifications:${handle}` : null;
+}
+
+function loadNotificationsForCurrentUser() {
+  const key = notificationsStorageKey();
+  if (!key) return [];
+  const saved = readStorage(key, []);
+  return Array.isArray(saved)
+    ? saved.filter(item => item && typeof item.id === "string" && typeof item.actor === "string" && typeof item.type === "string" && Number.isFinite(item.createdAt))
+    : [];
+}
+
+function loadFollowRequests() {
+  const saved = readStorage("mellow-follow-requests", []);
+  return Array.isArray(saved)
+    ? saved.filter(item => item && typeof item.id === "string" && typeof item.senderHandle === "string" && typeof item.recipientHandle === "string" && typeof item.status === "string")
+    : [];
+}
+
+function saveFollowRequests(requests) {
+  saveStorage("mellow-follow-requests", requests);
+}
+
+function getIncomingFollowRequests() {
+  if (!currentUser) return [];
+  return loadFollowRequests().filter(item => item.recipientHandle === currentUser.handle && item.status === "pending");
+}
+
+function getOutgoingFollowRequests() {
+  if (!currentUser) return [];
+  return loadFollowRequests().filter(item => item.senderHandle === currentUser.handle && item.status === "pending");
+}
+
+function getFollowRequestStatus(handle) {
+  if (!currentUser || !handle) return "not-requested";
+  if (followed.includes(handle)) return "following";
+  const request = loadFollowRequests().find(item => item.senderHandle === currentUser.handle && item.recipientHandle === handle && (item.status === "pending" || item.status === "accepted"));
+  if (request) return request.status === "accepted" ? "following" : "requested";
+  return "not-requested";
+}
+
+function addNotification(recipientHandle, { type, actor = currentUser.handle, postId = null, conversationId = null, requestId = null, text = "" }) {
+  if (!recipientHandle || recipientHandle === actor || !getUser(recipientHandle)) return;
+  const key = notificationsStorageKey(recipientHandle);
+  if (!key) return;
+  const recipientNotifications = readStorage(key, []);
+  const safeNotifications = Array.isArray(recipientNotifications) ? recipientNotifications : [];
+  safeNotifications.unshift({
+    id: crypto.randomUUID(),
+    type,
+    actor,
+    postId,
+    conversationId,
+    requestId,
+    text: String(text).slice(0, 180),
+    createdAt: Date.now(),
+    read: false
   });
-  if (error) console.warn("Notification not saved:", error.message);
+  saveStorage(key, safeNotifications.slice(0, 100));
 }
-async function markNotificationsRead(ids = null) {
-  const targets = notifications.filter(item => !item.read && (!ids || ids.includes(item.id))).map(item => item.id);
-  if (!targets.length || !cloudAuthUser) return;
-  const { error } = await supabaseClient.from("mellow_notifications")
-    .update({ read: true }).in("id", targets).eq("recipient_id", cloudAuthUser.id);
-  if (error) { showToast("Couldn't mark notifications as read."); return; }
-  notifications = notifications.map(item => targets.includes(item.id) ? { ...item, read: true } : item);
-  if (currentView === "notifications") render(); else renderNotificationBadges();
+
+function respondToFollowRequest(requestId, status) {
+  const requests = loadFollowRequests();
+  const request = requests.find(item => item.id === requestId);
+  if (!request) return;
+  request.status = status;
+  notifications = notifications.filter(item => !(item.type === "follow-request" && item.requestId === requestId));
+  saveStorage(notificationsStorageKey(), notifications);
+  if (status === "accepted") {
+    addNotification(request.senderHandle, {
+      type: "follow-accepted",
+      actor: currentUser.handle,
+      text: "accepted your follow request"
+    });
+  }
+  saveFollowRequests(requests);
+  notifications = loadNotificationsForCurrentUser();
+  render();
 }
+
+function markNotificationsRead(ids = null) {
+  const readIds = ids ? new Set(ids) : null;
+  notifications = notifications.map(item => readIds
+    ? readIds.has(item.id) ? { ...item, read: true } : item
+    : { ...item, read: true });
+  saveStorage(notificationsStorageKey(), notifications);
+}
+
 function unreadNotificationCount() {
   return notifications.filter(item => !item.read).length;
 }
@@ -130,6 +258,8 @@ function notificationDescription(item) {
   if (item.type === "like") return "liked your photo";
   if (item.type === "comment") return "commented on your photo";
   if (item.type === "follow") return "started following you";
+  if (item.type === "follow-request") return "wants to follow you";
+  if (item.type === "follow-accepted") return "accepted your follow request";
   if (item.type === "message") return "sent you a message";
   return "interacted with you";
 }
@@ -145,42 +275,80 @@ function formatNotificationTime(timestamp) {
 function renderNotifications() {
   const unread = unreadNotificationCount();
   const sorted = [...notifications].sort((a, b) => b.createdAt - a.createdAt);
+  const incoming = getIncomingFollowRequests();
   main.innerHTML = `<section class="notifications-page" aria-labelledby="notificationsTitle">
     <header class="notifications-header"><div><h1 class="page-title" id="notificationsTitle">Notifications</h1><p class="page-subtitle">A little update when someone interacts with you.</p></div>
       ${unread ? `<button class="mark-read-button" type="button" data-mark-notifications-read>Mark all as read</button>` : ""}
     </header>
+    ${incoming.length ? `<section class="profile-following"><div class="section-heading"><div><h2 class="right-heading">Follow requests</h2><p class="page-subtitle following-hint">Accept or ignore requests from your community.</p></div></div>${incoming.map(item => {
+      const actor = getUser(item.senderHandle);
+      if (!actor) return "";
+      return `<div class="friend-row">${avatar(actor)}<div class="friend-copy"><strong>${escapeHTML(actor.name)}</strong><small>${escapeHTML(displayHandle(actor.handle))}</small></div><button class="follow-button" type="button" data-accept-request="${escapeHTML(item.id)}">Accept</button><button class="follow-button" type="button" data-decline-request="${escapeHTML(item.id)}">Ignore</button></div>`;
+    }).join("")}</section>` : ""}
     ${sorted.length ? `<div class="notifications-list">${sorted.map(item => {
       const actor = getUser(item.actor);
       if (!actor) return "";
-      const preview = item.type === "comment" || item.type === "message" ? item.text : "";
-      return `<button class="notification-item${item.read ? "" : " unread"}" type="button" data-notification-id="${escapeHTML(item.id)}" ${item.postId ? `data-post-target="${escapeHTML(item.postId)}"` : ""} ${item.conversationId ? `data-chat-target="${escapeHTML(item.conversationId)}"` : ""}>
-        ${avatar(actor)}<span class="notification-copy"><span><strong>${escapeHTML(actor.name)}</strong> ${notificationDescription(item)}</span>${preview ? `<small>${escapeHTML(preview)}</small>` : ""}<time datetime="${new Date(item.createdAt).toISOString()}">${formatNotificationTime(item.createdAt)}</time></span>
-        ${item.postId && posts.find(post => post.id === item.postId)?.image ? `<img class="notification-thumbnail" src="${escapeHTML(posts.find(post => post.id === item.postId).image)}" alt="">` : `<span class="notification-type-icon" aria-hidden="true">${item.type === "follow" ? "＋" : item.type === "message" ? "↗" : item.type === "like" ? "♥" : "▤"}</span>`}
-      </button>`;
+      const preview = ["comment", "message", "follow-request", "follow-accepted"].includes(item.type) ? item.text : "";
+      const showResponseButtons = item.type === "follow-request" && item.requestId;
+      return `<div class="notification-item${item.read ? "" : " unread"}">
+        <button class="notification-main" type="button" data-notification-id="${escapeHTML(item.id)}" ${item.postId ? `data-post-target="${escapeHTML(item.postId)}"` : ""} ${item.conversationId ? `data-chat-target="${escapeHTML(item.conversationId)}"` : ""}>
+          ${avatar(actor)}<span class="notification-copy"><span><strong>${escapeHTML(actor.name)}</strong> ${notificationDescription(item)}</span>${preview ? `<small>${escapeHTML(preview)}</small>` : ""}<time datetime="${new Date(item.createdAt).toISOString()}">${formatNotificationTime(item.createdAt)}</time></span>
+          ${item.postId && posts.find(post => post.id === item.postId)?.image ? `<img class="notification-thumbnail" src="${escapeHTML(posts.find(post => post.id === item.postId).image)}" alt="">` : `<span class="notification-type-icon" aria-hidden="true">${item.type === "follow" || item.type === "follow-request" ? "＋" : item.type === "message" ? "↗" : item.type === "like" ? "♥" : item.type === "follow-accepted" ? "✓" : "▤"}</span>`}
+        </button>
+        ${showResponseButtons ? `<div class="notification-actions"><button class="follow-button" type="button" data-accept-request="${escapeHTML(item.requestId)}">Accept</button><button class="follow-button" type="button" data-decline-request="${escapeHTML(item.requestId)}">Ignore</button></div>` : ""}
+      </div>`;
     }).join("")}</div>` : `<div class="empty-state notifications-empty"><strong>You’re all caught up.</strong><p>When someone follows you, likes a photo, comments, or sends a message, you’ll see it here.</p></div>`}
   </section>`;
 }
 
-function loadFollowedForCurrentUser() { return followed; }
+function loadFollowedForCurrentUser() {
+  if (!currentUser) return [];
+  const key = followedStorageKey();
+  const stored = readStorage(key, null);
+  if (Array.isArray(stored)) return stored;
+
+  const legacy = readStorage("mellow-followed", []);
+  if (Array.isArray(legacy) && !localStorage.getItem("mellow-followed-migrated")) {
+    saveStorage(key, legacy);
+    localStorage.setItem("mellow-followed-migrated", "true");
+    return legacy;
+  }
+  return [];
+}
+
 function renderAuth() {
   document.body.classList.add("auth-mode");
   authScreen.hidden = false;
   authScreen.innerHTML = `<section class="auth-card" aria-labelledby="authTitle">
-    <a class="auth-brand" href="#" aria-label="mellow home"><span class="brand-mark">✳</span><span>mellow<span class="brand-dot">.</span></span></a>
+    <a class="auth-brand" href="#" aria-label="mellow home"><span class="brand-mark"><svg viewBox="0 0 32 32" aria-hidden="true"><path d="M7 17.4c2.4-5.8 5-8.7 8-8.7 2.4 0 3.8 2.8 5.2 6.1s2.7 5.4 4.8 5.4c1.2 0 2.4-.8 3.8-2.5"/><path d="M6 22.1h20"/></svg></span><span>mellow<span class="brand-dot">.</span></span></a>
     <span class="eyebrow">${authMode === "signup" ? "YOUR OWN LITTLE CORNER" : "WELCOME BACK"}</span>
     <h1 id="authTitle">${authMode === "signup" ? "Let’s connect the world." : "Good to see you again."}</h1>
-    <p class="auth-intro">${authMode === "signup" ? "Create an account to share photos and message people on other devices." : "Sign in using your email and password."}</p>
+    <p class="auth-intro">${authMode === "signup" ? "Create your account and start sharing with your people." : "Sign in with the username or email and password you chose on this device."}</p>
     <form class="auth-form" id="authForm" novalidate>
-      ${authMode === "signup" ? `<label for="authName">Your name</label><input id="authName" name="name" autocomplete="name" maxlength="40" placeholder="Your name" required>
-      <label for="authUsername">Username</label><input id="authUsername" name="username" type="text" autocomplete="username" maxlength="20" placeholder="yourname" required>` : ""}
-      <label for="authEmail">Email</label><input id="authEmail" name="email" type="email" autocomplete="email" maxlength="254" placeholder="you@example.com" required>
+      ${authMode === "signup" ? `<label for="authName">Your name</label><input id="authName" name="name" autocomplete="name" maxlength="40" placeholder="Your name" required>` : ""}
+      <label for="authUsername">Username or email</label><input id="authUsername" name="username" type="text" autocomplete="username" maxlength="254" placeholder="yourname or you@example.com" required>
       <label for="authPin">Password</label><input id="authPin" name="pin" minlength="6" maxlength="72" autocomplete="${authMode === "signup" ? "new-password" : "current-password"}" placeholder="At least 6 characters" type="password" required>
       <p class="auth-error" id="authError" role="alert" hidden></p>
       <button class="auth-submit" type="submit">${authMode === "signup" ? "Create account" : "Log in"} <span>→</span></button>
     </form>
-    <p class="auth-switch">${authMode === "signup" ? `Already have an account? <button type="button" data-auth-mode="login">Log in</button>` : `New around here? <button type="button" data-auth-mode="signup">Create an account</button>`}</p>
-    <p class="auth-notice"><strong>Small community test.</strong> Accounts, chats and photos are shared between devices through Supabase. Email ownership is not verified if you disable Confirm email. Do not use a password you use elsewhere or share private images.</p>
+    <p class="auth-switch">${authMode === "signup" ? `Already have an account? <button type="button" data-auth-mode="login"${authPending ? " disabled" : ""}>Log in</button>` : `New around here? <button type="button" data-auth-mode="signup"${authPending ? " disabled" : ""}>Create an account</button>`}</p>
+    <p class="auth-notice"><strong>Portfolio demo only.</strong> Use a throwaway password. Accounts, images, stories, and chats stay in this browser, are not private or synced, and are not shared with visitors on other devices.</p>
   </section>`;
+}
+
+async function hashPin(pin, salt) {
+  const encoder = new TextEncoder();
+  const key = await crypto.subtle.importKey("raw", encoder.encode(pin), "PBKDF2", false, ["deriveBits"]);
+  const bits = await crypto.subtle.deriveBits({ name: "PBKDF2", salt, iterations: 210000, hash: "SHA-256" }, key, 256);
+  return Array.from(new Uint8Array(bits), byte => byte.toString(16).padStart(2, "0")).join("");
+}
+
+function decodeSalt(value) {
+  return Uint8Array.from(atob(value), character => character.charCodeAt(0));
+}
+
+function encodeSalt(value) {
+  return btoa(String.fromCharCode(...value));
 }
 
 function avatar(user, color = "member", extraClass = "") {
@@ -248,7 +416,10 @@ function suggestionsMarkup() {
   return `<aside class="right-column" aria-label="Your profile and suggestions">
     <div class="your-profile">${avatar(currentUser)}<div class="profile-copy"><strong>${escapeHTML(currentUser.name)}</strong><small>${escapeHTML(displayHandle(currentUser.handle))}</small></div></div>
     <section class="right-section"><div class="section-heading"><h2 class="right-heading">People to know</h2><button class="see-all" data-view="explore" type="button">See all</button></div>
-      ${suggestions.length ? suggestions.map(person => `<div class="friend-row">${avatar(person)}<div class="friend-copy"><strong>${escapeHTML(person.name)}</strong><small>${escapeHTML(displayHandle(person.handle))}</small></div><button class="follow-button${followed.includes(person.handle) ? " following" : ""}" type="button" data-follow="${escapeHTML(person.handle)}">${followed.includes(person.handle) ? "Following" : "Follow"}</button></div>`).join("") : `<p class="page-subtitle">New people will show up here when they join.</p>`}
+      ${suggestions.length ? suggestions.map(person => {
+        const status = getFollowRequestStatus(person.handle);
+        return `<div class="friend-row">${avatar(person)}<div class="friend-copy"><strong>${escapeHTML(person.name)}</strong><small>${escapeHTML(displayHandle(person.handle))}</small></div><button class="follow-button${status === "following" ? " following" : ""}" type="button" data-follow="${escapeHTML(person.handle)}">${status === "following" ? "Following" : status === "requested" ? "Requested" : "Follow"}</button></div>`;
+      }).join("") : `<p class="page-subtitle">New people will show up here when they join.</p>`}
     </section>
     <div class="footer-links"><a href="#" data-toast="Thanks for being here.">About</a><a href="#" data-toast="Mellow is your space.">Community</a><a href="#" data-toast="Your privacy matters.">Privacy</a><a href="#" data-toast="Be kind to one another 💛">Guidelines</a><a href="#" data-toast="Made for little moments.">About us</a></div>
     <div class="footer-copy">© ${new Date().getFullYear()} MELLOW SOCIAL</div>
@@ -282,9 +453,6 @@ function conversationAvatar(conversation) {
 }
 
 function renderMessages() {
-  const oldInput = document.querySelector("#chatForm input");
-  const oldDraft = oldInput?.value || "";
-  const wasFocused = oldInput && document.activeElement === oldInput;
   const available = conversations
     .filter(item => item.memberHandles.includes(currentUser.handle))
     .sort((left, right) => (right.updatedAt || 0) - (left.updatedAt || 0));
@@ -295,7 +463,7 @@ function renderMessages() {
       ${available.length ? available.map(item => {
     const last = lastMessage(item);
     return `<button class="conversation-item${item.id === conversation?.id ? " active" : ""}" type="button" data-chat="${escapeHTML(item.id)}">${conversationAvatar(item)}<span class="conversation-info"><strong>${escapeHTML(conversationTitle(item))}</strong><span>${escapeHTML(last ? `${last.sender === currentUser.handle ? "You: " : ""}${last.text}` : "Start the conversation")}</span></span></button>`;
-  }).join("") : `<p class="conversation-empty">Your chats will show up here. Start one with any member who has signed up.</p>`}
+  }).join("") : `<p class="conversation-empty">Your chats will show up here. Start one with any account on this browser.</p>`}
     </div>
     ${conversation ? `<div class="chat-panel"><header class="chat-header">${conversationAvatar(conversation)}<div class="chat-name"><strong>${escapeHTML(conversationTitle(conversation))}</strong><span>${conversation.type === "group" ? `${conversation.memberHandles.length} members` : escapeHTML(displayHandle(conversation.memberHandles.find(handle => handle !== currentUser.handle) || ""))}</span></div></header>
       <div class="chat-messages" id="chatMessages">${conversation.messages.length ? conversation.messages.map(message => {
@@ -304,10 +472,8 @@ function renderMessages() {
     return `${conversation.type === "group" && !mine ? `<span class="message-sender">${escapeHTML(sender?.name || message.sender)}</span>` : ""}<div class="message-bubble${mine ? " mine" : ""}">${escapeHTML(message.text)}</div><span class="message-time${mine ? " mine" : ""}">${escapeHTML(message.time || "")}</span>`;
   }).join("") : `<div class="empty-state chat-empty"><strong>Say hello.</strong><p>This chat is ready when you are.</p></div>`}</div>
       <form class="chat-compose" id="chatForm"><input name="message" maxlength="500" autocomplete="off" placeholder="Write a message…" aria-label="Write a message" required><button type="submit" aria-label="Send message"><svg viewBox="0 0 24 24"><path d="m21 3-7.5 18-3.7-7.8L2 9.5 21 3Z"/><path d="M9.8 13.2 21 3"/></svg></button></form>
-    </div>` : `<div class="chat-panel chat-placeholder"><div class="empty-state"><strong>Your conversations, together.</strong><p>Start a direct chat with anyone who has signed up.</p><button class="create-button" type="button" data-start-chat>＋ New conversation</button></div></div>`}
+    </div>` : `<div class="chat-panel chat-placeholder"><div class="empty-state"><strong>Your conversations, together.</strong><p>Start a direct chat or create a group with anyone who has an account in this browser.</p><button class="create-button" type="button" data-start-chat>＋ New conversation</button></div></div>`}
   </section>`;
-  const newInput = document.querySelector("#chatForm input");
-  if (newInput && oldInput) { newInput.value = oldDraft; if (wasFocused) newInput.focus(); }
   const messageBox = document.querySelector("#chatMessages");
   if (messageBox) messageBox.scrollTop = messageBox.scrollHeight;
 }
@@ -330,9 +496,18 @@ function renderSaved() {
 function renderProfile() {
   const ownPosts = posts.filter(post => post.author === currentUser.handle);
   const followChoices = getPeople();
+  const incomingRequests = getIncomingFollowRequests();
   main.innerHTML = `<section class="profile-page"><div class="profile-hero">${avatar(currentUser)}<div><h1 class="page-title">${escapeHTML(currentUser.name)}</h1><p class="page-subtitle" style="margin:5px 0">${escapeHTML(displayHandle(currentUser.handle))}</p><div class="profile-stats"><span><strong>${ownPosts.length}</strong> posts</span><span><strong>${followed.length}</strong> following</span></div><label class="profile-photo-button" for="avatarInput">Change profile photo<input id="avatarInput" type="file" accept="image/*"></label></div><button class="logout-button" type="button" data-logout>Log out</button></div>
+    ${incomingRequests.length ? `<section class="profile-following"><div class="section-heading"><div><h2 class="right-heading">Follow requests</h2><p class="page-subtitle following-hint">Accept or ignore new requests.</p></div></div>${incomingRequests.map(item => {
+      const actor = getUser(item.senderHandle);
+      if (!actor) return "";
+      return `<div class="friend-row">${avatar(actor)}<div class="friend-copy"><strong>${escapeHTML(actor.name)}</strong><small>${escapeHTML(displayHandle(actor.handle))}</small></div><button class="follow-button" type="button" data-accept-request="${escapeHTML(item.id)}">Accept</button><button class="follow-button" type="button" data-decline-request="${escapeHTML(item.id)}">Ignore</button></div>`;
+    }).join("")}</section>` : ""}
     <section class="profile-following"><div class="section-heading"><div><h2 class="right-heading">Your community</h2><p class="page-subtitle following-hint">Follow people or start a conversation.</p></div></div>
-      ${followChoices.length ? followChoices.map(person => `<div class="friend-row">${avatar(person)}<div class="friend-copy"><strong>${escapeHTML(person.name)}</strong><small>${escapeHTML(displayHandle(person.handle))}</small></div><button class="follow-button${followed.includes(person.handle) ? " following" : ""}" type="button" data-follow="${escapeHTML(person.handle)}">${followed.includes(person.handle) ? "Following" : "Follow"}</button><button class="follow-button" type="button" data-message-user="${escapeHTML(person.handle)}">Message</button></div>`).join("") : `<p class="page-subtitle">You’re the first one here. Invite someone to sign up using your website link.</p>`}
+      ${followChoices.length ? followChoices.map(person => {
+        const status = getFollowRequestStatus(person.handle);
+        return `<div class="friend-row">${avatar(person)}<div class="friend-copy"><strong>${escapeHTML(person.name)}</strong><small>${escapeHTML(displayHandle(person.handle))}</small></div><button class="follow-button${status === "following" ? " following" : ""}" type="button" data-follow="${escapeHTML(person.handle)}">${status === "following" ? "Following" : status === "requested" ? "Requested" : "Follow"}</button><button class="follow-button" type="button" data-message-user="${escapeHTML(person.handle)}">Message</button></div>`;
+      }).join("") : `<p class="page-subtitle">You’re the first one here. Invite someone to create an account on this browser.</p>`}
     </section>
     ${ownPosts.length ? `<div class="profile-post-grid">${ownPosts.map(post => `<button type="button" data-toast="${escapeHTML(post.caption)}"><img src="${escapeHTML(post.image)}" alt="${escapeHTML(post.caption)}" loading="lazy"></button>`).join("")}</div>` : `<div class="empty-state saved-empty"><strong>Your story starts with a moment.</strong><p>Share your first photo and it’ll show up here.</p><button class="create-button" style="margin-top:16px" type="button" data-open-composer>Create a post</button></div>`}</section>`;
 }
@@ -370,6 +545,7 @@ function startDirectChat(handle) {
   if (!conversation) {
     conversation = { id: `direct-${memberHandles.join("-")}`, type: "direct", memberHandles, name: "", messages: [], updatedAt: Date.now() };
     conversations.unshift(conversation);
+    saveStorage("mellow-conversations", conversations);
   }
   currentChat = conversation.id;
   currentView = "messages";
@@ -379,17 +555,15 @@ function startDirectChat(handle) {
 function openNewChatDialog() {
   const people = getPeople();
   if (!people.length) {
-    showToast("Ask a friend to sign up on your website first.");
+    showToast("Create another account in this browser to start a chat.");
     return;
   }
   document.querySelector("#groupName").value = "";
-  document.querySelector("#groupName").closest("label").style.display = "none";
-  document.querySelector("#groupName").style.display = "none";
   document.querySelector("#chatPeopleList").innerHTML = people.map(person => `<label class="chat-person-option">${avatar(person)}<span><strong>${escapeHTML(person.name)}</strong><small>${escapeHTML(displayHandle(person.handle))}</small></span><input type="checkbox" name="members" value="${escapeHTML(person.handle)}"></label>`).join("");
   document.querySelector("#newChatDialog").showModal();
 }
 
-document.addEventListener("click", async event => {
+document.addEventListener("click", event => {
   const target = event.target instanceof Element ? event.target : null;
   if (!target) return;
   const authModeButton = target.closest("[data-auth-mode]");
@@ -399,12 +573,11 @@ document.addEventListener("click", async event => {
     return;
   }
   if (target.closest("[data-logout]")) {
-    supabaseClient.auth.signOut().then(({ error }) => {
-      if (error) { showToast(error.message); return; }
-      resetCloudState();
-      authMode = "login";
-      render();
-    });
+    sessionStorage.removeItem("mellow-active-user");
+    currentUser = null;
+    currentView = "home";
+    authMode = "login";
+    render();
     return;
   }
   if (target.closest("[data-mark-notifications-read]")) {
@@ -476,36 +649,67 @@ document.addEventListener("click", async event => {
     currentChat = chatButton.dataset.chat;
     renderMessages();
   }
+  const acceptRequestButton = target.closest("[data-accept-request]");
+  if (acceptRequestButton) {
+    const requestId = acceptRequestButton.dataset.acceptRequest;
+    respondToFollowRequest(requestId, "accepted");
+    return;
+  }
+  const declineRequestButton = target.closest("[data-decline-request]");
+  if (declineRequestButton) {
+    const requestId = declineRequestButton.dataset.declineRequest;
+    respondToFollowRequest(requestId, "declined");
+    return;
+  }
   const followButton = target.closest("[data-follow]");
   if (followButton) {
-    const person = getUser(followButton.dataset.follow);
-    if (!person || !cloudAuthUser) return;
-    const wasFollowing = followed.includes(person.handle);
-    const query = supabaseClient.from("mellow_follows");
-    const { error } = wasFollowing
-      ? await query.delete().eq("follower_id", cloudAuthUser.id).eq("followed_id", person.uid)
-      : await query.insert({ follower_id: cloudAuthUser.id, followed_id: person.uid });
-    if (error) { showToast(error.message); return; }
-    if (!wasFollowing) void addNotification(person.handle, { type: "follow" });
-    await reloadFollows();
+    const handle = followButton.dataset.follow;
+    const requestStatus = getFollowRequestStatus(handle);
+    if (requestStatus === "following") {
+      followed = followed.filter(item => item !== handle);
+      saveStorage(followedStorageKey(), followed);
+      render();
+      return;
+    }
+    if (requestStatus === "requested") {
+      showToast("Follow request already sent.");
+      return;
+    }
+    const requests = loadFollowRequests();
+    const request = {
+      id: crypto.randomUUID(),
+      senderHandle: currentUser.handle,
+      recipientHandle: handle,
+      status: "pending",
+      createdAt: Date.now()
+    };
+    requests.unshift(request);
+    saveFollowRequests(requests);
+    addNotification(handle, { type: "follow-request", actor: currentUser.handle, requestId: request.id, text: "wants to follow you" });
+    showToast("Follow request sent.");
     render();
   }
   const postCard = target.closest("[data-post-id]");
-  if (postCard && target.closest(".like-button, .post-save")) {
+  if (postCard && target.closest(".like-button")) {
     const post = posts.find(item => item.id === postCard.dataset.postId);
-    if (!post) return;
-    const isLike = Boolean(target.closest(".like-button"));
-    const table = isLike ? "mellow_likes" : "mellow_bookmarks";
-    const marked = (isLike ? post.likesBy : post.savedBy).includes(currentUser.handle);
-    const query = supabaseClient.from(table);
-    const { error } = marked
-      ? await query.delete().eq("post_id", post.id).eq("user_id", cloudAuthUser.id)
-      : await query.insert({ post_id: post.id, user_id: cloudAuthUser.id });
-    if (error) { showToast(error.message); return; }
-    if (isLike && !marked) void addNotification(post.author, { type: "like", postId: post.id });
-    await reloadPosts();
+    if (!Array.isArray(post.likesBy)) post.likesBy = [];
+    const wasLiked = post.likesBy.includes(currentUser.handle);
+    post.likesBy = wasLiked
+      ? post.likesBy.filter(handle => handle !== currentUser.handle)
+      : [...post.likesBy, currentUser.handle];
+    if (!wasLiked) addNotification(post.author, { type: "like", postId: post.id });
+    saveStorage("mellow-posts", posts);
     render();
-    if (!isLike) showToast(marked ? "Removed from saved moments" : "Saved to your collection");
+  } else if (postCard && target.closest(".post-save")) {
+    const post = posts.find(item => item.id === postCard.dataset.postId);
+    if (!Array.isArray(post.savedBy)) post.savedBy = [];
+    const wasSaved = post.savedBy.includes(currentUser.handle);
+    post.savedBy = wasSaved
+      ? post.savedBy.filter(handle => handle !== currentUser.handle)
+      : [...post.savedBy, currentUser.handle];
+    saveStorage("mellow-posts", posts);
+    render();
+    showToast(wasSaved ? "Removed from saved moments" : "Saved to your little collection ✨");
   } else if (postCard && target.closest(".comment-focus")) {
     postCard.querySelector(".comment-form input").focus();
   }
@@ -528,39 +732,77 @@ document.addEventListener("submit", async event => {
     event.preventDefault();
     if (authPending) return;
     const formData = new FormData(form);
-    const email = String(formData.get("email") || "").trim().toLowerCase();
-    const password = String(formData.get("pin") || "");
-    const handle = String(formData.get("username") || "").trim().replace(/^@/, "").toLowerCase();
-    const name = String(formData.get("name") || "").trim();
+    const username = String(formData.get("username") || "").trim().replace(/^@/, "").toLowerCase();
+    const pin = String(formData.get("pin") || "");
     const errorBox = document.querySelector("#authError");
-    if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)) { showAuthError(errorBox, "Enter a valid email address."); return; }
-    if (authMode === "signup" && (!/^[a-z0-9._]{3,20}$/.test(handle) || name.length < 2 || name.length > 40)) {
-      showAuthError(errorBox, "Enter your name and a username with 3–20 letters, numbers, . or _."); return;
+    const isUsername = /^[a-z0-9._]{3,20}$/.test(username);
+    const isEmail = username.length <= 254 && /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(username);
+    if (!isUsername && !isEmail) {
+      showAuthError(errorBox, "Enter a username (3–20 letters, numbers, periods, or underscores) or a valid email address.");
+      return;
     }
-    if (password.length < 6 || password.length > 72) { showAuthError(errorBox, "Use a password of 6–72 characters."); return; }
+    if (pin.length < 6 || pin.length > 72) {
+      showAuthError(errorBox, "Use a password with 6–72 characters.");
+      return;
+    }
     authPending = true;
     const submitButton = form.querySelector('button[type="submit"]');
+    const modeButton = authScreen.querySelector("[data-auth-mode]");
+    const formInputs = [...form.querySelectorAll("input")];
+    formInputs.forEach(input => { input.disabled = true; });
     submitButton.disabled = true;
     submitButton.textContent = "Please wait…";
+    if (modeButton) modeButton.disabled = true;
     try {
-      const result = authMode === "signup"
-        ? await supabaseClient.auth.signUp({ email, password, options: { data: { full_name: name, handle } } })
-        : await supabaseClient.auth.signInWithPassword({ email, password });
-      if (result.error) throw result.error;
-      if (!result.data.session) throw new Error("No session created. Turn OFF Confirm email in Supabase Authentication → Sign In / Providers, then try again.");
-      await loadCloudState(result.data.session.user);
+      if (!globalThis.crypto?.subtle || !globalThis.crypto?.getRandomValues) {
+        throw new Error("Secure password hashing is unavailable in this browser context.");
+      }
+      const accounts = getAccounts();
+      if (authMode === "signup") {
+        const name = String(formData.get("name") || "").trim();
+        if (name.length < 2 || name.length > 40) {
+          showAuthError(errorBox, "Enter a name between 2 and 40 characters.");
+          return;
+        }
+        if (accounts.some(account => account.handle.toLowerCase() === username)) {
+          showAuthError(errorBox, "That username is already registered on this browser.");
+          return;
+        }
+        const salt = crypto.getRandomValues(new Uint8Array(16));
+        accounts.push({ name, handle: username, avatar: "", salt: encodeSalt(salt), pinHash: await hashPin(pin, salt) });
+        localStorage.setItem("mellow-accounts", JSON.stringify(accounts));
+        setCurrentUser(accounts[accounts.length - 1]);
+        showToast("Your account is ready.");
+      } else {
+        if (!accounts.length) {
+          showAuthError(errorBox, "No account is saved in this browser yet. Create an account first.");
+          return;
+        }
+        const account = accounts.find(item => item.handle.toLowerCase() === username);
+        const valid = account ? await hashPin(pin, decodeSalt(account.salt)) === account.pinHash : false;
+        if (!valid) {
+          showAuthError(errorBox, "Username or password is incorrect.");
+          return;
+        }
+        setCurrentUser(account);
+      }
       currentView = "home";
       render();
-      showToast(authMode === "signup" ? "Your account is ready!" : "Welcome back!");
     } catch (error) {
-      console.error("Authentication failed:", error);
-      showAuthError(errorBox, error.message || "Couldn't sign in. Check your settings and try again.");
+      console.error("Could not complete sign-in.", error);
+      showAuthError(errorBox, error instanceof Error && error.message === "Secure password hashing is unavailable in this browser context."
+        ? "Password sign-in needs a browser with Web Crypto. Open this site on HTTPS or localhost and try again."
+        : "Sign-in failed. Check this browser’s storage access and try again.");
     } finally {
       authPending = false;
+      formInputs.forEach(input => {
+        if (input.isConnected) input.disabled = false;
+      });
       if (submitButton.isConnected) {
         submitButton.disabled = false;
         submitButton.innerHTML = `${authMode === "signup" ? "Create account" : "Log in"} <span>→</span>`;
       }
+      if (modeButton?.isConnected) modeButton.disabled = false;
     }
     return;
   }
@@ -568,13 +810,13 @@ document.addEventListener("submit", async event => {
     event.preventDefault();
     const input = form.elements.namedItem("comment");
     const text = input.value.trim();
-    const post = posts.find(item => item.id === form.closest("[data-post-id]")?.dataset.postId);
-    if (!text || !post) return;
-    const { error } = await supabaseClient.from("mellow_comments")
-      .insert({ post_id: post.id, user_id: cloudAuthUser.id, content: text });
-    if (error) { showToast(error.message); return; }
-    void addNotification(post.author, { type: "comment", postId: post.id, text });
-    await reloadPosts();
+    if (!text) return;
+    const card = form.closest("[data-post-id]");
+    const post = posts.find(item => item.id === card.dataset.postId);
+    if (!Array.isArray(post.comments)) post.comments = [];
+    post.comments.push({ name: currentUser.handle, text });
+    addNotification(post.author, { type: "comment", postId: post.id, text });
+    saveStorage("mellow-posts", posts);
     render();
     return;
   }
@@ -582,81 +824,98 @@ document.addEventListener("submit", async event => {
     event.preventDefault();
     const input = form.elements.namedItem("message");
     const text = input.value.trim();
-    const chat = conversations.find(item => item.id === currentChat);
-    if (!text || !chat || chat.type !== "direct") return;
-    const recipientHandle = chat.memberHandles.find(handle => handle !== currentUser.handle);
-    const recipient = getUser(recipientHandle);
-    if (!recipient) { showToast("Recipient not found. Refresh the page."); return; }
-    const submitButton = form.querySelector('button[type="submit"]');
-    submitButton.disabled = true;
-    const { error } = await supabaseClient.from("messages")
-      .insert({ sender_id: cloudAuthUser.id, receiver_id: recipient.uid, content: text });
-    submitButton.disabled = false;
-    if (error) { showToast("Message not sent: " + error.message); return; }
-    input.value = "";
-    void addNotification(recipientHandle, { type: "message", conversationId: chat.id, text });
-    await reloadMessages();
+    if (!text) return;
+    const conversation = conversations.find(item => item.id === currentChat);
+    const now = new Date();
+    const time = now.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" });
+    conversation.messages.push({ text, sender: currentUser.handle, time });
+    conversation.updatedAt = Date.now();
+    conversation.memberHandles
+      .filter(handle => handle !== currentUser.handle)
+      .forEach(handle => addNotification(handle, {
+        type: "message",
+        conversationId: conversation.id,
+        text: conversation.type === "group" ? `${currentUser.name}: ${text}` : text
+      }));
+    saveStorage("mellow-conversations", conversations);
     renderMessages();
     return;
   }
   if (form.id === "newChatForm") {
     event.preventDefault();
-    const handles = [...new Set(new FormData(form).getAll("members").map(String))].filter(handle => getUser(handle));
-    if (handles.length !== 1) { showToast("Choose exactly one person. This test supports private one-to-one chats."); return; }
-    startDirectChat(handles[0]);
+    const formData = new FormData(form);
+    const handles = [...new Set(formData.getAll("members").map(String))].filter(handle => getUser(handle));
+    if (!handles.length) {
+      showToast("Choose at least one person to chat with.");
+      return;
+    }
+    const memberHandles = [...new Set([currentUser.handle, ...handles])].sort();
+    if (memberHandles.length === 2) {
+      startDirectChat(handles[0]);
+    } else {
+      const name = String(formData.get("groupName") || "").trim();
+      const conversation = {
+        id: `group-${crypto.randomUUID()}`,
+        type: "group",
+        name,
+        memberHandles,
+        messages: [],
+        updatedAt: Date.now()
+      };
+      conversations.unshift(conversation);
+      saveStorage("mellow-conversations", conversations);
+      currentChat = conversation.id;
+      currentView = "messages";
+      render();
+    }
     document.querySelector("#newChatDialog").close();
     return;
   }
   if (form.id === "storyForm") {
     event.preventDefault();
-    if (!selectedStoryImage) { showToast("Choose a photo before sharing your story."); return; }
-    const submit = form.querySelector('button[type="submit"]');
-    submit.disabled = true;
-    try {
-      const imageUrl = await uploadPhoto(selectedStoryImage);
-      const { error } = await supabaseClient.from("mellow_stories").insert({
-        user_id: cloudAuthUser.id, image_url: imageUrl,
-        caption: document.querySelector("#storyCaption").value.trim()
-      });
-      if (error) throw error;
-      await reloadStories();
-      selectedStoryImage = "";
-      form.reset();
-      storyImagePreview.hidden = true;
-      storyImagePreview.removeAttribute("src");
-      storyUploadZone.classList.remove("has-image");
-      document.querySelector("#storyImageStatus").textContent = "Choose an image to continue";
-      document.querySelector("#storyComposerDialog").close();
-      render();
-      showToast("Your story is live.");
-    } catch (error) { showToast("Story upload failed: " + error.message); }
-    finally { submit.disabled = false; }
+    if (!selectedStoryImage) {
+      showToast("Choose a photo before sharing your story.");
+      return;
+    }
+    stories.unshift({
+      id: crypto.randomUUID(),
+      author: currentUser.handle,
+      image: selectedStoryImage,
+      caption: document.querySelector("#storyCaption").value.trim(),
+      createdAt: Date.now()
+    });
+    saveStorage("mellow-stories", stories);
+    scheduleStoryExpiry();
+    selectedStoryImage = "";
+    form.reset();
+    storyImagePreview.hidden = true;
+    storyImagePreview.removeAttribute("src");
+    storyUploadZone.classList.remove("has-image");
+    document.querySelector("#storyImageStatus").textContent = "Choose an image to continue";
+    document.querySelector("#storyComposerDialog").close();
+    render();
+    showToast("Your story is live.");
     return;
   }
   if (form.id === "postForm") {
     event.preventDefault();
-    if (!selectedImage) { showToast("Choose a photo before sharing."); return; }
-    const submit = form.querySelector('button[type="submit"]');
-    submit.disabled = true;
-    try {
-      const imageUrl = await uploadPhoto(selectedImage);
-      const { error } = await supabaseClient.from("mellow_posts")
-        .insert({ user_id: cloudAuthUser.id, image_url: imageUrl, caption: postCaption.value.trim() });
-      if (error) throw error;
-      await reloadPosts();
-      form.reset();
-      selectedImage = "";
-      imagePreview.hidden = true;
-      uploadZone.classList.remove("has-image");
-      composer.close();
-      currentView = "home";
-      render();
-      window.scrollTo({ top: 0, behavior: "smooth" });
-      showToast("Photo shared with your community!");
-    } catch (error) { showToast("Photo upload failed: " + error.message); }
-    finally { submit.disabled = false; }
+    if (!selectedImage) {
+      showToast("Choose a photo before sharing.");
+      return;
+    }
+    const caption = postCaption.value.trim();
+    posts.unshift({ id: crypto.randomUUID(), author: currentUser.handle, image: selectedImage, time: Date.now(), caption, likesBy: [], savedBy: [], comments: [] });
+    saveStorage("mellow-posts", posts);
+    form.reset();
+    selectedImage = "";
+    imagePreview.hidden = true;
+    uploadZone.classList.remove("has-image");
+    composer.close();
+    currentView = "home";
+    render();
+    window.scrollTo({ top: 0, behavior: "smooth" });
+    showToast("Your moment is out in the world ✨");
   }
-
 });
 
 function showAuthError(container, message) {
@@ -719,19 +978,24 @@ document.addEventListener("change", async event => {
   const file = input.files?.[0];
   if (!file) return;
   if (!file.type.startsWith("image/") || file.size > 10 * 1024 * 1024) {
-    showToast("Choose an image under 10 MB."); input.value = ""; return;
+    showToast("Choose an image under 10 MB.");
+    input.value = "";
+    return;
   }
   try {
-    const url = await uploadPhoto(await compressImage(file));
-    const { error } = await supabaseClient.from("profiles")
-      .update({ avatar_url: url }).eq("id", cloudAuthUser.id);
-    if (error) throw error;
-    const account = cloudAccounts.find(item => item.uid === cloudAuthUser.id);
-    account.avatar = url;
+    const avatarImage = await compressImage(file);
+    const accounts = getAccounts();
+    const account = accounts.find(item => item.handle === currentUser.handle);
+    if (!account) throw new Error("The current account is no longer available.");
+    account.avatar = avatarImage;
+    saveStorage("mellow-accounts", accounts);
     setCurrentUser(account);
     render();
     showToast("Profile photo updated.");
-  } catch (error) { showToast("Couldn't update your profile photo: " + error.message); }
+  } catch (error) {
+    console.error("Could not update the profile photo.", error);
+    showToast("Couldn't update the profile photo. Please try another image.");
+  }
 });
 
 async function compressImage(file) {
@@ -818,191 +1082,24 @@ document.querySelector("#newChatDialog").addEventListener("click", event => {
   if (event.target === event.currentTarget) event.currentTarget.close();
 });
 
-// Supabase holds all shared data; no localStorage-based account or content syncing.
-bootstrapMellow();
-
-
-// ---------- Real Supabase data layer ----------
-function cloudError(result, operation) {
-  if (result.error) throw new Error(`${operation}: ${result.error.message}`);
-  return result.data || [];
-}
-
-function lookupHandle(userId) {
-  return cloudAccounts.find(account => account.uid === userId)?.handle || null;
-}
-
-function resetCloudState() {
-  cloudAuthUser = null; currentUser = null; cloudAccounts = []; posts = [];
-  conversations = []; stories = []; notifications = []; followed = []; currentChat = null;
-  if (cloudChannel && supabaseClient) supabaseClient.removeChannel(cloudChannel);
-  cloudChannel = null;
-}
-
-async function reloadProfiles() {
-  const rows = cloudError(await supabaseClient.from("profiles")
-    .select("id, handle, name, avatar_url").order("created_at", { ascending: true }).limit(200), "Profiles");
-  cloudAccounts = rows.map(row => ({ uid: row.id, name: row.name, handle: row.handle, avatar: row.avatar_url || "" }));
-}
-
-async function reloadMessages() {
-  if (!cloudAuthUser) return;
-  const uid = cloudAuthUser.id;
-  const rows = cloudError(await supabaseClient.from("messages")
-    .select("id, sender_id, receiver_id, content, created_at")
-    .or(`sender_id.eq.${uid},receiver_id.eq.${uid}`)
-    .order("created_at", { ascending: true }).limit(1000), "Messages");
-  const oldEmpty = conversations.filter(chat => chat.type === "direct" && chat.messages.length === 0);
-  const grouped = new Map(oldEmpty.map(chat => [chat.id, { ...chat, messages: [] }]));
-  for (const row of rows) {
-    const otherId = row.sender_id === uid ? row.receiver_id : row.sender_id;
-    const otherHandle = lookupHandle(otherId);
-    if (!otherHandle || !currentUser) continue;
-    const handles = [currentUser.handle, otherHandle].sort();
-    const id = `direct-${handles.join("-")}`;
-    if (!grouped.has(id)) grouped.set(id, { id, type: "direct", name: "", memberHandles: handles, messages: [], updatedAt: 0 });
-    const chat = grouped.get(id);
-    chat.messages.push({ sender: lookupHandle(row.sender_id), text: row.content,
-      time: new Date(row.created_at).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" }) });
-    chat.updatedAt = Math.max(chat.updatedAt || 0, new Date(row.created_at).getTime());
+window.addEventListener("storage", event => {
+  if (event.key === "mellow-posts") posts = readStorage("mellow-posts", []);
+  if (event.key === "mellow-conversations") conversations = readStorage("mellow-conversations", []);
+  if (event.key === notificationsStorageKey()) notifications = loadNotificationsForCurrentUser();
+  if (event.key === "mellow-stories") {
+    const stored = readStorage("mellow-stories", []);
+    stories = (Array.isArray(stored) ? stored : []).filter(isActiveStory);
+    scheduleStoryExpiry();
   }
-  conversations = [...grouped.values()];
-}
-
-async function reloadPosts() {
-  if (!cloudAuthUser) return;
-  const [postRows, likeRows, bookmarkRows, commentRows] = await Promise.all([
-    supabaseClient.from("mellow_posts").select("id,user_id,image_url,caption,created_at")
-      .order("created_at", { ascending: false }).limit(200),
-    supabaseClient.from("mellow_likes").select("post_id,user_id").limit(1000),
-    supabaseClient.from("mellow_bookmarks").select("post_id,user_id").eq("user_id", cloudAuthUser.id).limit(1000),
-    supabaseClient.from("mellow_comments").select("post_id,user_id,content,created_at")
-      .order("created_at", { ascending: true }).limit(1000)
-  ]);
-  const pr = cloudError(postRows, "Posts");
-  const lr = cloudError(likeRows, "Likes");
-  const br = cloudError(bookmarkRows, "Bookmarks");
-  const cr = cloudError(commentRows, "Comments");
-  posts = pr.map(p => ({ id: p.id, author: lookupHandle(p.user_id), image: p.image_url,
-    caption: p.caption, time: new Date(p.created_at).getTime(),
-    likesBy: lr.filter(x => x.post_id === p.id).map(x => lookupHandle(x.user_id)).filter(Boolean),
-    savedBy: br.filter(x => x.post_id === p.id).map(x => lookupHandle(x.user_id)).filter(Boolean),
-    comments: cr.filter(x => x.post_id === p.id).map(x => ({ name: lookupHandle(x.user_id) || "member", text: x.content }))
-  })).filter(p => Boolean(p.author));
-}
-
-async function reloadStories() {
-  const since = new Date(Date.now() - STORY_LIFETIME).toISOString();
-  const rows = cloudError(await supabaseClient.from("mellow_stories")
-    .select("id,user_id,image_url,caption,created_at").gt("created_at", since)
-    .order("created_at", { ascending: false }).limit(200), "Stories");
-  stories = rows.map(s => ({ id: s.id, author: lookupHandle(s.user_id), image: s.image_url,
-    caption: s.caption, createdAt: new Date(s.created_at).getTime() })).filter(isActiveStory);
-  scheduleStoryExpiry();
-}
-
-async function reloadFollows() {
-  if (!cloudAuthUser) return;
-  const rows = cloudError(await supabaseClient.from("mellow_follows")
-    .select("followed_id").eq("follower_id", cloudAuthUser.id).limit(200), "Follows");
-  followed = rows.map(row => lookupHandle(row.followed_id)).filter(Boolean);
-}
-
-async function reloadNotifications() {
-  if (!cloudAuthUser) return;
-  const rows = cloudError(await supabaseClient.from("mellow_notifications")
-    .select("id, actor_id, type, post_id, conversation_id, text, created_at, read")
-    .eq("recipient_id", cloudAuthUser.id).order("created_at", { ascending: false }).limit(100), "Notifications");
-  notifications = rows.map(n => ({ id: n.id, actor: lookupHandle(n.actor_id) || "member", type: n.type,
-    postId: n.post_id, conversationId: n.conversation_id, text: n.text,
-    createdAt: new Date(n.created_at).getTime(), read: n.read }));
-  if (currentUser) renderNotificationBadges();
-}
-
-async function loadCloudState(authUser) {
-  cloudAuthUser = authUser;
-  await reloadProfiles();
-  const account = cloudAccounts.find(u => u.uid === authUser.id);
-  if (!account) throw new Error("Profile missing. Run supabase-setup.sql in the SQL Editor before signing up.");
-  setCurrentUser(account);
-  await Promise.all([reloadMessages(), reloadPosts(), reloadStories(), reloadFollows(), reloadNotifications()]);
-  listenForCloudUpdates();
-}
-
-async function uploadPhoto(dataUrl) {
-  if (!cloudAuthUser) throw new Error("Log in before uploading.");
-  const blob = await (await fetch(dataUrl)).blob();
-  const path = `${cloudAuthUser.id}/${crypto.randomUUID()}.webp`;
-  const { error } = await supabaseClient.storage.from("mellow-media")
-    .upload(path, blob, { contentType: "image/webp", upsert: false });
-  if (error) throw error;
-  return supabaseClient.storage.from("mellow-media").getPublicUrl(path).data.publicUrl;
-}
-
-function listenForCloudUpdates() {
-  if (cloudChannel) supabaseClient.removeChannel(cloudChannel);
-  cloudChannel = supabaseClient.channel("mellow-updates-" + cloudAuthUser.id)
-    .on("postgres_changes", { event: "INSERT", schema: "public", table: "messages" }, async payload => {
-      if (!cloudAuthUser || (payload.new.sender_id !== cloudAuthUser.id && payload.new.receiver_id !== cloudAuthUser.id)) return;
-      try { await reloadMessages(); if (currentView === "messages") renderMessages(); }
-      catch (error) { console.warn(error); }
-    })
-    .subscribe();
-}
-
-async function refreshCommunity() {
-  if (!cloudAuthUser || syncing) return;
-  syncing = true;
-  try {
-    const oldProfiles = JSON.stringify(cloudAccounts);
-    const oldMessages = JSON.stringify(conversations.map(c => [c.id, c.messages]));
-    const oldPosts = JSON.stringify(posts);
-    const oldStories = JSON.stringify(stories);
-    const oldNotifications = JSON.stringify(notifications);
-    await reloadProfiles();
-    const newCurrent = cloudAccounts.find(x => x.uid === cloudAuthUser.id);
-    if (newCurrent) setCurrentUser(newCurrent);
-    await Promise.all([reloadMessages(), reloadPosts(), reloadStories(), reloadFollows(), reloadNotifications()]);
-    if (currentView === "messages") {
-      if (JSON.stringify(conversations.map(c => [c.id, c.messages])) !== oldMessages) renderMessages();
-    } else if ((currentView === "home" || currentView === "explore" || currentView === "profile" || currentView === "saved")
-      && (JSON.stringify(posts) !== oldPosts || JSON.stringify(stories) !== oldStories || JSON.stringify(cloudAccounts) !== oldProfiles)) render();
-    else if (currentView === "notifications" && JSON.stringify(notifications) !== oldNotifications) render();
-  } catch (error) { console.warn("Cloud refresh:", error.message); }
-  finally { syncing = false; }
-}
-
-async function bootstrapMellow() {
-  const url = window.MELLOW_SUPABASE_URL;
-  const key = window.MELLOW_SUPABASE_PUBLISHABLE_KEY;
-  if (!window.supabase?.createClient || !url || !key || url.includes("YOUR-PROJECT") || key.includes("REPLACE_ME")) {
-    document.body.classList.add("auth-mode");
-    authScreen.hidden = false;
-    authScreen.innerHTML = `<section class="auth-card"><h1>Connect Mellow to Supabase</h1>
-      <p class="auth-intro">Open <strong>config.js</strong> and paste your Supabase Project URL and <strong>sb_publishable_...</strong> key. First run <strong>supabase-setup.sql</strong> in Supabase SQL Editor. Then refresh this page.</p>
-      <p class="auth-notice">Never paste your sb_secret_ or service_role key into these public files.</p></section>`;
-    return;
+  if (event.key === "mellow-accounts") {
+    if (currentUser) currentUser = getUser(currentUser.handle);
+    if (!currentUser) {
+      currentView = "home";
+      sessionStorage.removeItem("mellow-active-user");
+    }
   }
-  supabaseClient = window.supabase.createClient(url, key);
-  document.body.classList.add("auth-mode");
-  authScreen.hidden = false;
-  authScreen.innerHTML = `<section class="auth-card"><h1>Connecting…</h1><p class="auth-intro">Loading your community.</p></section>`;
-  try {
-    const { data, error } = await supabaseClient.auth.getSession();
-    if (error) throw error;
-    if (data.session?.user) await loadCloudState(data.session.user);
-    authMode = "login";
-    render();
-  } catch (error) {
-    console.error(error);
-    resetCloudState();
-    authMode = "login";
-    render();
-    showToast("Supabase setup error: " + error.message);
-  }
-  supabaseClient.auth.onAuthStateChange((event) => {
-    if (event === "SIGNED_OUT") { resetCloudState(); authMode = "login"; render(); }
-  });
-  // Polling keeps the test functioning even when Realtime is unavailable or disconnected.
-  window.setInterval(refreshCommunity, 8000);
-}
+  if (["mellow-posts", "mellow-conversations", "mellow-stories", "mellow-accounts", notificationsStorageKey()].includes(event.key)) render();
+});
+
+render();
+scheduleStoryExpiry();
